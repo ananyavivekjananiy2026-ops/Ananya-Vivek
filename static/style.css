@@ -888,9 +888,126 @@ color: #bdccdd;
 
 
 
-.evidence-item span {
+.evidence-head {
 
-color: #ffb84d;
+display: flex;
+
+justify-content: space-between;
+
+align-items: center;
+
+gap: 8px;
+
+margin-bottom: 6px;
+
+}
+
+
+
+.status-supported {
+
+background: #123f2e;
+
+color: #5fe0a4;
+
+}
+
+
+
+.status-partial {
+
+background: #493b1e;
+
+color: #ffc05b;
+
+}
+
+
+
+.status-missing {
+
+background: #4a1f26;
+
+color: #ff8a97;
+
+}
+
+
+
+.status-unavailable {
+
+background: #2a3140;
+
+color: #9fb0c8;
+
+}
+
+
+
+.sources {
+
+list-style: none;
+
+padding: 0;
+
+margin: 10px 0 0;
+
+display: flex;
+
+flex-direction: column;
+
+gap: 8px;
+
+}
+
+
+
+.sources li {
+
+display: flex;
+
+flex-direction: column;
+
+gap: 2px;
+
+padding: 8px 10px;
+
+border-radius: 8px;
+
+background: #0a2544;
+
+border: 1px solid #1c3d63;
+
+}
+
+
+
+.sources a {
+
+color: #b0c9ff;
+
+font-size: 12px;
+
+text-decoration: none;
+
+line-height: 1.4;
+
+}
+
+
+
+.sources a:hover {
+
+text-decoration: underline;
+
+}
+
+
+
+.sources small,
+.evidence-note {
+
+color: #7691b2;
 
 font-size: 11px;
 

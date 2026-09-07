@@ -3,12 +3,29 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+import os
 import re
 
 app = Flask(__name__)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (NewsCheck Hackathon/1.0)"
+}
+
+NEWSAPI_KEY = os.environ.get("newsapi") or os.environ.get("NEWSAPI_KEY", "")
+NEWSAPI_URL = "https://newsapi.org/v2/everything"
+NEWSAPI_TIMEOUT = 8
+MAX_SOURCES_PER_CLAIM = 4
+
+STOPWORDS = {
+    "about", "after", "again", "against", "along", "among", "around",
+    "because", "before", "being", "below", "between", "could", "during",
+    "every", "first", "found", "their", "there", "these", "thing", "things",
+    "those", "through", "under", "until", "where", "which", "while", "whose",
+    "would", "should", "might", "other", "another", "still", "since", "years",
+    "people", "today", "years", "according", "reported", "report", "says",
+    "said", "including", "however", "already", "really", "something",
 }
 
 TRUSTED_DOMAINS = {
@@ -267,26 +284,190 @@ def source_score(host):
     return 12, "Moderate"
 
 
-def verify_claim(claim):
+def build_keywords(claim):
 
-    words = re.findall(
-        r"[A-Za-z0-9%'-]+",
-        claim
-    )
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'-]+|\d[\d,.]*%?", claim)
 
-    keywords = [
-        word
-        for word in words
-        if len(word) > 4
-    ][:10]
+    proper_nouns = []
+    numbers = []
+    common = []
+
+    for index, word in enumerate(words):
+
+        cleaned = word.strip("'-")
+        lowered = cleaned.lower()
+
+        if not cleaned or lowered in STOPWORDS:
+            continue
+
+        if cleaned[0].isdigit():
+            numbers.append(cleaned)
+
+        # Capitalised words that are not simply the first word of the sentence
+        elif cleaned[0].isupper() and index > 0:
+            proper_nouns.append(cleaned)
+
+        elif len(cleaned) > 4:
+            common.append(cleaned)
+
+    ordered = []
+
+    for word in proper_nouns + numbers + common:
+        if word.lower() not in (w.lower() for w in ordered):
+            ordered.append(word)
+
+    return ordered
+
+
+def search_newsapi(keywords, exclude_domain):
 
     query = " ".join(keywords)
 
-    return {
+    params = {
+        "q": query[:500],
+        "searchIn": "title,description",
+        "language": "en",
+        "sortBy": "relevancy",
+        "pageSize": 10,
+    }
+
+    if exclude_domain:
+        params["excludeDomains"] = exclude_domain
+
+    response = requests.get(
+        NEWSAPI_URL,
+        params=params,
+        headers={"X-Api-Key": NEWSAPI_KEY},
+        timeout=NEWSAPI_TIMEOUT
+    )
+
+    payload = response.json()
+
+    if payload.get("status") != "ok":
+        raise RuntimeError(payload.get("message") or f"NewsAPI HTTP {response.status_code}")
+
+    return payload.get("articles", [])
+
+
+def summarise_sources(articles):
+
+    sources = []
+    seen_domains = set()
+
+    for article in articles:
+
+        url = article.get("url") or ""
+        domain = root_domain(urlparse(url).netloc) if url else ""
+
+        if not url or domain in seen_domains:
+            continue
+
+        seen_domains.add(domain)
+
+        published = (article.get("publishedAt") or "")[:10]
+
+        sources.append({
+            "title": (article.get("title") or "Untitled").strip()[:160],
+            "outlet": ((article.get("source") or {}).get("name") or domain).strip(),
+            "domain": domain,
+            "url": url,
+            "published": published,
+            "trusted": domain in TRUSTED_DOMAINS,
+        })
+
+        if len(sources) >= MAX_SOURCES_PER_CLAIM:
+            break
+
+    return sources
+
+
+def classify_sources(sources):
+
+    trusted_count = sum(1 for source in sources if source["trusted"])
+
+    if len(sources) >= 3 or trusted_count >= 1 and len(sources) >= 2:
+        return "Supported"
+
+    if sources:
+        return "Partially Supported"
+
+    return "Not Found"
+
+
+def verify_claim(claim, exclude_domain=None):
+
+    keywords = build_keywords(claim)
+    query = " ".join(keywords[:6])
+
+    result = {
         "status": "Needs verification",
         "query": query,
-        "sources": []
+        "sources": [],
+        "note": "",
     }
+
+    if not NEWSAPI_KEY:
+        result["note"] = "NewsAPI key not configured."
+        return result
+
+    if len(keywords) < 2:
+        result["status"] = "Not Found"
+        result["note"] = "Claim too vague to search."
+        return result
+
+    try:
+
+        articles = search_newsapi(keywords[:5], exclude_domain)
+
+        # Broad claims often match nothing when every keyword is required,
+        # so fall back to the three strongest keywords before giving up.
+        if not articles and len(keywords) > 3:
+            result["query"] = " ".join(keywords[:3])
+            articles = search_newsapi(keywords[:3], exclude_domain)
+
+        sources = summarise_sources(articles)
+
+        result["sources"] = sources
+        result["status"] = classify_sources(sources)
+
+        if not sources:
+            result["note"] = "No independent coverage found in the last 30 days."
+
+    except (requests.exceptions.RequestException, RuntimeError, ValueError) as error:
+
+        result["status"] = "Unavailable"
+        result["note"] = f"Verification service error: {error}"
+
+    return result
+
+
+def claim_verification_score(verified):
+
+    if not verified:
+        return 10, "No claims"
+
+    checked = [v for v in verified if v["status"] not in ("Unavailable", "Needs verification")]
+
+    if not checked:
+        return 10, "Unavailable"
+
+    weights = {
+        "Supported": 1.0,
+        "Partially Supported": 0.6,
+        "Not Found": 0.15,
+    }
+
+    ratio = sum(weights.get(v["status"], 0) for v in checked) / len(checked)
+    points = round(4 + ratio * 16)
+
+    if ratio >= 0.7:
+        label = "Corroborated"
+    elif ratio >= 0.4:
+        label = "Partially corroborated"
+    else:
+        label = "Weak corroboration"
+
+    return points, label
 
 
 @app.route("/")
@@ -358,10 +539,18 @@ def analyze():
             article["text"]
         )
 
-        verified = [
-            verify_claim(claim)
-            for claim in claims
-        ]
+        if claims:
+            with ThreadPoolExecutor(max_workers=min(8, len(claims))) as pool:
+                verified = list(pool.map(
+                    lambda claim: verify_claim(claim, exclude_domain=domain),
+                    claims
+                ))
+        else:
+            verified = []
+
+        supported_count = sum(
+            1 for v in verified if v["status"] == "Supported"
+        )
 
         # -------------------------
         # AUTHOR
@@ -395,11 +584,7 @@ def analyze():
         # CLAIM SCORE
         # -------------------------
 
-        claim_points = (
-            10
-            if len(claims) <= 2
-            else 8
-        )
+        claim_points, claim_label = claim_verification_score(verified)
 
         # -------------------------
         # FINAL SCORE
@@ -441,8 +626,10 @@ def analyze():
             "summary":
                 f"NewsCheck analyzed the source, "
                 f"article language, transparency, "
-                f"author information and "
-                f"{len(claims)} candidate claims.",
+                f"author information and cross-checked "
+                f"{len(claims)} candidate claims against "
+                f"independent news coverage "
+                f"({supported_count} supported).",
 
             "score": total,
 
@@ -478,7 +665,7 @@ def analyze():
                     "name": "Claim Verification",
                     "score": claim_points,
                     "max": 20,
-                    "label": "Needs verification"
+                    "label": claim_label
                 },
 
                 {
@@ -508,7 +695,9 @@ def analyze():
                     "id": i + 1,
                     "text": claim,
                     "status": verification["status"],
-                    "query": verification["query"]
+                    "query": verification["query"],
+                    "sources": verification["sources"],
+                    "note": verification["note"]
                 }
 
                 for i, (
@@ -529,7 +718,7 @@ def analyze():
                 "Website & author analysis",
                 "Article extracted & parsed",
                 f"{len(claims)} claims identified",
-                "Verification queries prepared",
+                f"Claims cross-checked via NewsAPI ({supported_count} supported)",
                 "Credibility report generated"
 
             ],
