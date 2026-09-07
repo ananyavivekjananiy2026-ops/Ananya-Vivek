@@ -549,7 +549,7 @@ data.signals[2].label === "Sensational"
 : "No major sensational-language pattern was detected.",
 
 
-"External verification requires a connected search/fact-check provider in production."
+claimSummary(data.claims)
 
 ];
 
@@ -653,7 +653,7 @@ claim => `
 Claim ${claim.id}
 </span>
 
-<span class="status">
+<span class="status ${statusClass(claim.status)}">
 ${esc(claim.status)}
 </span>
 
@@ -666,8 +666,10 @@ ${esc(claim.text)}
 
 
 <small>
-Verification query:
-${esc(claim.query)}
+${claim.sources.length
+  ? `${claim.sources.length} independent source${claim.sources.length === 1 ? "" : "s"} found`
+  : esc(claim.note || "No sources found")}
+&middot; query: ${esc(claim.query)}
 </small>
 
 </div>
@@ -700,10 +702,13 @@ data.claims.length
 
 <p>
 
-The MVP has prepared search queries for
-each claim. Connect a news/fact-check API
-to retrieve live sources and classify each
-claim as Supported, Contradicted, or Not Found.
+Each claim was searched against NewsAPI's
+index of independent outlets (excluding the
+article's own domain). A claim is Supported
+when multiple outlets or a trusted outlet
+report the same story, Partially Supported
+with a single match, and Not Found when no
+recent coverage exists.
 
 </p>
 
@@ -714,23 +719,45 @@ claim as Supported, Contradicted, or Not Found.
 +
 
 data.claims
-.slice(0, 3)
 .map(
 claim => `
 
 <div class="evidence-item">
 
+<div class="evidence-head">
+
 <b>
 Claim ${claim.id}
 </b>
+
+<span class="status ${statusClass(claim.status)}">
+${esc(claim.status)}
+</span>
+
+</div>
 
 <p>
 ${esc(claim.text)}
 </p>
 
-<span>
-○ ${esc(claim.status)}
-</span>
+${claim.sources.length
+
+? `<ul class="sources">
+${claim.sources.map(source => `
+<li>
+<a href="${esc(source.url)}" target="_blank" rel="noopener noreferrer">
+${esc(source.title)}
+</a>
+<small>
+${esc(source.outlet)}${source.trusted ? " &middot; trusted outlet" : ""}${source.published ? " &middot; " + esc(source.published) : ""}
+</small>
+</li>
+`).join("")}
+</ul>`
+
+: `<small class="evidence-note">${esc(claim.note || "No independent coverage found.")}</small>`
+
+}
 
 </div>
 
@@ -739,6 +766,38 @@ ${esc(claim.text)}
 .join("")
 
 : "";
+
+}
+
+
+function claimSummary(claims) {
+
+  if (!claims.length) {
+    return "No claims were available for cross-verification.";
+  }
+
+  const count = status => claims.filter(c => c.status === status).length;
+
+  if (claims.every(c => c.status === "Unavailable" || c.status === "Needs verification")) {
+    return "Live claim verification was unavailable for this run.";
+  }
+
+  return `Cross-verification: ${count("Supported")} supported, `
+    + `${count("Partially Supported")} partially supported, `
+    + `${count("Not Found")} without independent coverage.`;
+
+}
+
+
+function statusClass(status) {
+
+  switch (status) {
+    case "Supported": return "status-supported";
+    case "Partially Supported": return "status-partial";
+    case "Not Found": return "status-missing";
+    case "Unavailable": return "status-unavailable";
+    default: return "";
+  }
 
 }
 
